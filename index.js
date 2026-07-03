@@ -1005,7 +1005,9 @@ class SettingsManager {
             isApplyingSettings = false;
         }
     }
-
+	
+	// --- ORIGINAL SETTINGS APPLY CODE START ---
+	/*
     async _applySettingsToUI(settings) {
         if (DEBUG_MODE) console.log('STCL: _applySettingsToUI called with:', settings);
 
@@ -1029,6 +1031,45 @@ class SettingsManager {
         // Apply the connection profile (which handles completion source automatically)
         return await this._applyConnectionProfile(settings);
     }
+	*/
+	// --- ORIGINAL SETTINGS APPLY CODE END ---
+	
+	// --- BLAEZE SETTINGS APPLY ORDER FIX START ---
+    async _applySettingsToUI(settings) {
+        if (DEBUG_MODE) console.log('STCL: _applySettingsToUI called with:', settings);
+
+        let profileResult = true;
+
+        // 1. NAJPIERW ładujemy profil połączenia (który załaduje sobie swój domyślny preset)
+        if (settings.connectionProfile) {
+            profileResult = await this._applyConnectionProfile(settings);
+
+            // Dajemy SillyTavern 250ms na ogarnięcie asynchronicznych zmian w UI i nadpisanie presetu
+            // przez wbudowany system "bind preset to profile".
+			// --- DISABLED ---
+            //await new Promise(resolve => setTimeout(resolve, 250));
+        }
+
+        // 2. DOPIERO POTEM ładujemy preset z STCL, żeby ostatecznie nadpisać ten wbudowany
+        if (settings.preset) {
+            const presetManager = getPresetManager();
+            if (presetManager) {
+                const currentPreset = presetManager.getSelectedPresetName();
+                if (currentPreset !== settings.preset) {
+                    const presetValue = presetManager.findPreset(settings.preset);
+                    if (presetValue !== undefined && presetValue !== null) {
+                        if (DEBUG_MODE) console.log(`STCL: Applying saved preset: ${settings.preset}`);
+                        presetManager.selectPreset(presetValue);
+                    } else {
+                        console.warn(`STCL: Saved preset "${settings.preset}" not found`);
+                    }
+                }
+            }
+        }
+
+        return profileResult;
+    }
+	// --- BLAEZE SETTINGS APPLY ORDER FIX END ---
 
     async _applyConnectionProfile(settings) {
         // Apply connection profile setting
@@ -2175,6 +2216,209 @@ function setupEventListeners() {
                 // Use the GROUP_UPDATED event instead of timeout for proper synchronization
                 onContextChanged();
             }, 'group chat creation');
+
+            // --- BLAEZE CUSTOM AUTO-SAVE START --- V1
+			/*
+            const autoSaveEvents = [
+                event_types.PRESET_CHANGED,
+                event_types.CONNECTION_PROFILE_LOADED
+            ];
+
+            autoSaveEvents.forEach(eventType => {
+                if (eventType) {
+                    registerEventHandler(eventType, async () => {
+                        // isApplyingSettings sprawdza, czy to my kliknęliśmy, czy wtyczka wczytuje czat.
+                        // getContext()?.chatId upewnia się, że nie robimy tego w próżni.
+                        if (settingsManager && getContext()?.chatId && !isApplyingSettings) {
+                            try {
+                                const targets = { character: false, chat: true };
+                                await settingsManager.saveCurrentUISettings(targets);
+
+                                if (DEBUG_MODE) console.log(`STCL (Blaeze Mod): Auto-saved chat settings due to ${eventType}`);
+
+                                // Ciche powiadomienie, żebyś wiedział, że skrypt zatrybił
+                                if (typeof toastr !== 'undefined') {
+                                    toastr.success('Auto-saved chat config', 'STCL');
+                                }
+                            } catch (error) {
+                                console.error('STCL (Blaeze Mod): Error in Auto-Save action:', error);
+                            }
+                        }
+                    }, `Blaeze auto-save on ${eventType}`);
+                }
+            });
+			*/
+            // --- BLAEZE CUSTOM AUTO-SAVE END --- V1
+
+            // --- BLAEZE CUSTOM AUTO-SAVE START --- V2
+			/*
+            let blaezeDebounceTimer = null;
+
+            const blaezeAutoSave = async (eventType) => {
+                // Szybki odsiew – jeśli wtyczka aktualnie działa, od razu uciekamy
+                if (isApplyingSettings) return;
+                if (!settingsManager || !getContext()?.chatId) return;
+
+                // DEBOUNCER: Jeśli kolejny event przyszedł w krótkim czasie, kasujemy poprzednie zadanie
+                if (blaezeDebounceTimer) clearTimeout(blaezeDebounceTimer);
+
+                // Ustawiamy timer na 300ms. Zlepi to podwójne eventy w jeden strzał.
+                blaezeDebounceTimer = setTimeout(async () => {
+                    // Sprawdzamy flagę jeszcze raz na wypadek, gdyby zmieniła się w trakcie czekania
+                    if (isApplyingSettings) return;
+
+                    try {
+                        const targets = { character: false, chat: true };
+                        await settingsManager.saveCurrentUISettings(targets);
+
+                        if (DEBUG_MODE) console.log(`STCL (Blaeze Mod): Debounced auto-save executed. Trigger: ${eventType}`);
+
+                        // Pojedynczy, czysty toastr
+                        if (typeof toastr !== 'undefined') {
+                            toastr.success('Chat config auto-saved', 'STCL');
+                        }
+                    } catch (error) {
+                        console.error('STCL (Blaeze Mod): Error in Auto-Save action:', error);
+                    }
+                }, 300); // 300 milisekund - dla Ciebie niezauważalne, dla CPU wieczność do posprzątania śmieci
+            };
+
+            const autoSaveEvents = [
+                event_types.PRESET_CHANGED,
+                event_types.CONNECTION_PROFILE_LOADED
+            ];
+
+            autoSaveEvents.forEach(eventType => {
+                if (eventType) {
+                    registerEventHandler(eventType, () => blaezeAutoSave(eventType), `Blaeze auto-save on ${eventType}`);
+                }
+            });
+			*/
+            // --- BLAEZE CUSTOM AUTO-SAVE END --- V2
+			
+			/*
+			// --- BLAEZE CUSTOM AUTO-SAVE START --- V3
+            let blaezeDebounceTimer = null;
+            let blaezeLastChatChange = 0;
+            const BLANKING_PERIOD_MS = 1500; // 1.5 sekundy "czasu martwego" po zmianie chatu
+
+            // 1. Łapiemy zmianę chatu, żeby uzbroić nasz timer (Deadband)
+            registerEventHandler(event_types.CHAT_CHANGED, () => {
+                blaezeLastChatChange = Date.now();
+                if (DEBUG_MODE) console.log('STCL (Blaeze Mod): Zmiana chatu. Uzbrajam Blanking Timer.');
+            }, 'Blaeze chat change deadband');
+
+            // 2. Główna funkcja auto-save
+            const blaezeAutoSave = async (eventType) => {
+                if (isApplyingSettings) return;
+                if (!settingsManager || !getContext()?.chatId) return;
+
+                // DEAD TIME FILTER: Jeśli od zmiany chatu minęło mniej niż 1.5s, ignorujemy event
+                if (Date.now() - blaezeLastChatChange < BLANKING_PERIOD_MS) {
+                    if (DEBUG_MODE) console.log(`STCL (Blaeze Mod): Zignorowano ${eventType} (Trwa stan nieustalony).`);
+                    return;
+                }
+
+                // Debouncer sprzętowy
+                if (blaezeDebounceTimer) clearTimeout(blaezeDebounceTimer);
+
+                blaezeDebounceTimer = setTimeout(async () => {
+                    // Double check, bo asynchroniczność to suka
+                    if (isApplyingSettings || (Date.now() - blaezeLastChatChange < BLANKING_PERIOD_MS)) return;
+
+                    try {
+                        const targets = { character: false, chat: true };
+                        await settingsManager.saveCurrentUISettings(targets);
+
+                        if (typeof toastr !== 'undefined') {
+                            toastr.success('Chat config auto-saved', 'STCL');
+                        }
+                    } catch (error) {
+                        console.error('STCL (Blaeze Mod): Error in Auto-Save action:', error);
+                    }
+                }, 300);
+            };
+
+            const autoSaveEvents = [
+                event_types.PRESET_CHANGED,
+                event_types.CONNECTION_PROFILE_LOADED
+            ];
+
+            autoSaveEvents.forEach(eventType => {
+                if (eventType) {
+                    registerEventHandler(eventType, () => blaezeAutoSave(eventType), `Blaeze auto-save on ${eventType}`);
+                }
+            });
+            // --- BLAEZE CUSTOM AUTO-SAVE END --- V3
+			*/
+			
+			// --- BLAEZE CUSTOM AUTO-SAVE START --- V4
+            let blaezeDebounceTimer = null;
+            let blaezeLastAutoSwap = 0;
+            const BLANKING_PERIOD_MS = 1000; //1500
+
+            // 1. Definiujemy "Sprzętowe Przerwania", które mają zablokować auto-zapis.
+            // Każde z tych zdarzeń oznacza, że to system (albo wtyczka) rzeźbi w ustawieniach, a nie Ty ręcznie.
+            const deadbandTriggers = [
+                event_types.CHAT_CHANGED,
+                event_types.GROUP_MEMBER_DRAFTED, // Krytyczne dla chatów grupowych (zmiana mówcy)
+                event_types.MESSAGE_SWIPED,       // Ochrona przy regeneracji wiadomości
+                event_types.GENERATION_STARTED,   // Ochrona przed i w trakcie generowania
+                event_types.GENERATION_ENDED      // Ochrona chwilę po wygenerowaniu (sprzątanie po LLMie)
+            ];
+
+            // Rejestrujemy resetowanie timera dla każdego "przerwania"
+            deadbandTriggers.forEach(eventType => {
+                if (eventType) {
+                    registerEventHandler(eventType, () => {
+                        blaezeLastAutoSwap = Date.now();
+                        if (DEBUG_MODE) console.log(`STCL (Blaeze Mod): Event [${eventType}]. Uzbrajam Blanking Timer na ${BLANKING_PERIOD_MS}ms.`);
+                    }, `Blaeze deadband on ${eventType}`);
+                }
+            });
+
+            // 2. Główna funkcja auto-save
+            const blaezeAutoSave = async (eventType) => {
+                if (isApplyingSettings) return;
+                if (!settingsManager || !getContext()?.chatId) return;
+
+                // DEAD TIME FILTER: Jeśli od ostatniego przerwania minęło mniej niż 1.5s - odrzucamy!
+                if (Date.now() - blaezeLastAutoSwap < BLANKING_PERIOD_MS) {
+                    if (DEBUG_MODE) console.log(`STCL (Blaeze Mod): Zignorowano ${eventType} (Aktywna maska przerwań).`);
+                    return;
+                }
+
+                if (blaezeDebounceTimer) clearTimeout(blaezeDebounceTimer);
+
+                blaezeDebounceTimer = setTimeout(async () => {
+                    // Double-check, na wypadek asynchronicznego poślizgu w czasie tych 300ms
+                    if (isApplyingSettings || (Date.now() - blaezeLastAutoSwap < BLANKING_PERIOD_MS)) return;
+
+                    try {
+                        const targets = { character: false, chat: true };
+                        await settingsManager.saveCurrentUISettings(targets);
+
+                        if (typeof toastr !== 'undefined') {
+                            toastr.success('Chat config auto-saved', 'STCL');
+                        }
+                    } catch (error) {
+                        console.error('STCL (Blaeze Mod): Error in Auto-Save action:', error);
+                    }
+                }, 300);
+            };
+
+            const autoSaveEvents = [
+                event_types.PRESET_CHANGED,
+                event_types.CONNECTION_PROFILE_LOADED
+            ];
+
+            autoSaveEvents.forEach(eventType => {
+                if (eventType) {
+                    registerEventHandler(eventType, () => blaezeAutoSave(eventType), `Blaeze auto-save on ${eventType}`);
+                }
+            });
+            // --- BLAEZE CUSTOM AUTO-SAVE END --- V4
+			
 
             registerEventHandler(event_types.GROUP_MEMBER_DRAFTED, async (chId) => {
                 try {
